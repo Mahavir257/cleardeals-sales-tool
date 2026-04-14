@@ -2,68 +2,94 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import re
 
-st.set_page_config(page_title="CLEARDEALS Sales Control", layout="wide")
+st.set_page_config(page_title="Sales Master Dashboard", layout="wide")
 
-st.title("🚀 CLEARDEALS Sales Control System")
+# Custom Styling
+st.markdown("""
+    <style>
+    .stMetric { background-color: #ffffff; padding: 10px; border-radius: 8px; border: 1px solid #e0e0e0; }
+    .main { background-color: #f9f9f9; }
+    </style>
+    """, unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("Upload 'Meeting Date Report' CSV", type=["csv"])
+st.title("📊 Sales Master Dashboard")
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    
-    # --- 1. SMART DATE CONVERSION ---
-    # Your CSV uses DD/MM/YYYY. This line forces Python to understand that.
-    df['Meeting-Date'] = pd.to_datetime(df['Meeting-Date'], format='%d/%m/%Y', errors='coerce')
-    
-    # Drop rows where date failed to parse (prevents the "blank" dashboard)
+# --- DATA INPUT ---
+st.sidebar.header("📥 Data Source")
+input_method = st.sidebar.radio("Input Method", ["File Upload", "Google Sheet Link"])
+
+df = None
+if input_method == "File Upload":
+    file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+    if file:
+        df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
+else:
+    url = st.sidebar.text_input("Paste Google Sheet Link:")
+    if url:
+        try:
+            sheet_id = re.search(r'd/([a-zA-Z0-9-_]+)', url).group(1)
+            df = pd.read_csv(f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv")
+        except: st.sidebar.error("Invalid Link")
+
+if df is not None:
+    # --- DATA PREP ---
+    df['Meeting-Date'] = pd.to_datetime(df['Meeting-Date'], dayfirst=True, errors='coerce')
     df = df.dropna(subset=['Meeting-Date'])
+    df['is_deal'] = df['Feedbacks'].str.contains('Deal Closed', case=False, na=False).astype(int)
+    df['is_meeting'] = df['Contact Type'].str.contains('Meeting Done', case=False, na=False).astype(int)
 
-    # --- 2. LOGIC FOR DEALS & MEETINGS ---
-    df['is_deal'] = df['Feedbacks'].str.contains('Deal Closed', case=False, na=False)
-    df['is_meeting_done'] = df['Contact Type'].str.contains('Meeting Done', case=False, na=False)
+    # --- NAVIGATION TABS ---
+    tab1, tab2, tab3 = st.tabs(["📈 Main Dashboard", "⚔️ BDE Comparison", "📅 Calendar View"])
 
-    # --- 3. SIDEBAR ---
-    st.sidebar.header("🛠 Control Panel")
-    
-    all_assignees = sorted(df['Assignee'].dropna().unique().tolist())
-    selected_assignees = st.sidebar.multiselect("Select Members", options=all_assignees, default=all_assignees)
-    
-    # Date Range with safety check
-    min_date = df['Meeting-Date'].min().to_pydatetime()
-    max_date = df['Meeting-Date'].max().to_pydatetime()
-    date_range = st.sidebar.date_input("Select Date Range", [min_date, max_date])
+    # --- TAB 1: MAIN DASHBOARD ---
+    with tab1:
+        st.sidebar.divider()
+        all_bdes = sorted(df['Assignee'].dropna().unique().tolist())
+        selected = st.sidebar.multiselect("Filter Team", all_bdes, default=all_bdes)
+        f_df = df[df['Assignee'].isin(selected)]
 
-    # --- 4. FILTERING ---
-    mask = (df['Assignee'].isin(selected_assignees))
-    if len(date_range) == 2:
-        mask = mask & (df['Meeting-Date'].dt.date >= date_range[0]) & (df['Meeting-Date'].dt.date <= date_range[1])
-    
-    filtered_df = df[mask]
+        # Metrics
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Meetings", f_df['is_meeting'].sum())
+        c2.metric("Deals Closed", f_df['is_deal'].sum())
+        c3.metric("Conv. Rate", f"{(f_df['is_deal'].sum()/f_df['is_meeting'].sum()*100):.1f}%" if f_df['is_meeting'].sum()>0 else "0%")
 
-    # --- 5. THE "NOTHING SHOWING" FIX ---
-    if filtered_df.empty:
-        st.error("⚠️ No data found for the selected Date Range or Assignees. Try expanding your date filter in the sidebar!")
-        st.write("Current Filter Start:", date_range[0])
-        st.write("Data Available From:", min_date)
-    else:
-        # METRICS
-        total_meetings = filtered_df['is_meeting_done'].sum()
-        total_deals = filtered_df['is_deal'].sum()
-        
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total Meetings Done", total_meetings)
-        m2.metric("Deals Closed", total_deals)
-        m3.metric("Conversion Rate", f"{(total_deals/total_meetings*100):.1f}%" if total_meetings > 0 else "0%")
-
-        # CHARTS
-        st.subheader("Performance Overview")
-        fig = px.bar(filtered_df.groupby('Assignee')['is_meeting_done'].sum().reset_index(), 
-                     x='Assignee', y='is_meeting_done', color_discrete_sequence=['#007bff'])
+        # View Selector
+        view = st.radio("Chart View", ["Bar Chart (Performance)", "Trend Line (Timeline)"], horizontal=True)
+        if view == "Bar Chart (Performance)":
+            fig = px.bar(f_df.groupby('Assignee')['is_meeting'].sum().reset_index(), x='Assignee', y='is_meeting', color='is_meeting')
+        else:
+            fig = px.line(f_df.groupby('Meeting-Date')['is_meeting'].sum().reset_index(), x='Meeting-Date', y='is_meeting', markers=True)
         st.plotly_chart(fig, use_container_width=True)
+
+    # --- TAB 2: BDE COMPARISON ---
+    with tab2:
+        st.subheader("Compare Performance (BDE vs BDE)")
+        col_x, col_y = st.columns(2)
+        bde_1 = col_x.selectbox("Select BDE 1", all_bdes, index=0)
+        bde_2 = col_y.selectbox("Select BDE 2", all_bdes, index=1 if len(all_bdes)>1 else 0)
+
+        comp_df = df[df['Assignee'].isin([bde_1, bde_2])]
+        comp_stats = comp_df.groupby('Assignee').agg({'is_meeting':'sum', 'is_deal':'sum', 'Name':'count'})
+        st.bar_chart(comp_stats[['is_meeting', 'is_deal']])
+        st.table(comp_stats)
+
+    # --- TAB 3: CALENDAR VIEW ---
+    with tab3:
+        st.subheader("Meeting Density Calendar")
+        # Create a heatmap-style view
+        cal_df = f_df.groupby('Meeting-Date').size().reset_index(name='Meetings')
+        fig_cal = px.scatter(cal_df, x='Meeting-Date', y='Meetings', size='Meetings', color='Meetings', title="Daily Meeting Volume")
+        st.plotly_chart(fig_cal, use_container_width=True)
         
-        st.subheader("Current Data View")
-        st.dataframe(filtered_df[['Meeting-Date', 'Assignee', 'Name', 'Contact Type', 'Feedbacks']])
+        st.write("### Raw Data Log")
+        st.dataframe(f_df[['Meeting-Date', 'Assignee', 'Name', 'Contact Type', 'Feedbacks']], use_container_width=True)
+
+    # --- DOWNLOAD ---
+    csv = f_df.to_csv(index=False).encode('utf-8')
+    st.sidebar.download_button("📥 Download Master Report", data=csv, file_name="Sales_Master_Report.csv")
 
 else:
-    st.info("Please upload your CSV file to view the dashboard.")
+    st.info("Please upload data to activate the Sales Master Dashboard.")
